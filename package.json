@@ -15,10 +15,11 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "ts-node src/index.ts",
+    "start": "tsx src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.91",
     "dotenv": "^16.6.1",
     "fast-csv": "^5.0.5",
     "fs-extra": "^11.3.3",
@@ -31,7 +32,7 @@
     "@types/node": "^25.2.3",
     "@types/pdf-parse": "^1.1.5",
     "csv-writer": "^1.6.0",
-    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }

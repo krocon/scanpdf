@@ -142,3 +142,4 @@ vite.config.ts.timestamp-*
 /data/1822direkt/
 /key.txt
 /set_key.sh
+/.output.txt

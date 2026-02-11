@@ -1,13 +1,12 @@
 import fs from "fs-extra";
 import path from "path";
-import * as pdf from "pdf-parse";
-const pdfParser = (pdf as any).default || pdf;
-import { createObjectCsvWriter } from "csv-writer";
+import {PDFParse} from "pdf-parse";
+import {createObjectCsvWriter} from "csv-writer";
 import OpenAI from "openai";
 import readline from "node:readline";
 import "dotenv/config";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY});
 
 const DATA_DIR = "./data";
 const OUTPUT_FILE = "./kontoauszuege.csv";
@@ -15,17 +14,19 @@ const OUTPUT_FILE = "./kontoauszuege.csv";
 const csvWriter = createObjectCsvWriter({
   path: OUTPUT_FILE,
   header: [
-    { id: "date", title: "Date" },
-    { id: "description", title: "Description" },
-    { id: "amount", title: "Amount" },
-    { id: "currency", title: "Currency" },
+    {id: "date", title: "Date"},
+    {id: "description", title: "Description"},
+    {id: "amount", title: "Amount"},
+    {id: "currency", title: "Currency"},
   ],
   append: false,
 });
 
 async function extractText(filePath: string): Promise<string> {
   const buffer = await fs.readFile(filePath);
-  const data = await pdfParser(buffer);
+  const parser = new PDFParse({data: buffer});
+  const data = await parser.getText();
+  await parser.destroy();
   return data.text;
 }
 
@@ -36,12 +37,16 @@ async function extractStructured(text: string): Promise<any[]> {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      response_format: { type: "json_object" },
+      response_format: {type: "json_object"},
       messages: [
         {
           role: "system",
           content:
-            "Extract all bank transactions as JSON array under key 'transactions'. Fields: date (ISO), description, amount (number), currency.",
+            "Extract all bank transactions as JSON array under key 'transactions'. " +
+            "Fields: date (ISO), description, amount (number), currency. " +
+            "Important: The 'description' must capture EVERY detail from the transaction text without any summarization or omission. " +
+            "If the description consists of multiple lines in the source, include the content of all those lines. " +
+            "Preserve all reference numbers, dates, and names found in the transaction details.",
         },
         {
           role: "user",
@@ -52,9 +57,17 @@ async function extractStructured(text: string): Promise<any[]> {
 
     const content = response.choices[0].message.content;
     if (!content) return [];
-    
+
     const parsed = JSON.parse(content);
-    return parsed.transactions || [];
+    const transactions = parsed.transactions || [];
+
+    // Clean up descriptions: replace any newlines/multiple spaces with a single space
+    return transactions.map((t: any) => ({
+      ...t,
+      description: typeof t.description === "string"
+        ? t.description.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim()
+        : t.description,
+    }));
   } catch (error) {
     console.error("Error calling OpenAI:", error);
     return [];
@@ -114,20 +127,17 @@ async function run() {
       const elapsed = Date.now() - startTime;
       const avgTimePerFile = elapsed / processed;
       const estimatedRemaining = avgTimePerFile * (totalFiles - processed);
+      const percent = ((processed / totalFiles) * 100).toFixed(1);
+      const progressLine = `[${percent}%] ${processed}/${totalFiles} | Zeit: ${formatTime(elapsed)} | Verbleibend: ${formatTime(estimatedRemaining)} | Fehler: ${errors.length} | Übersprungen: ${skippedCount}`;
 
-      if (processed % 5 === 0 || processed === totalFiles || totalFiles < 100) {
-        const percent = ((processed / totalFiles) * 100).toFixed(1);
-        const progressLine = `[${percent}%] ${processed}/${totalFiles} | Zeit: ${formatTime(elapsed)} | Verbleibend: ${formatTime(estimatedRemaining)} | Fehler: ${errors.length} | Übersprungen: ${skippedCount}`;
-
-        if (process.stdout.isTTY) {
-          readline.clearLine(process.stdout, 0);
-          readline.cursorTo(process.stdout, 0);
-          process.stdout.write(progressLine);
-        } else {
-          // Fallback for non-TTY environments: only print every 10% to avoid flooding
-          if (processed % Math.max(1, Math.floor(totalFiles / 10)) === 0 || processed === totalFiles) {
-            process.stdout.write(`\n${progressLine}`);
-          }
+      if (process.stdout.isTTY) {
+        readline.clearLine(process.stdout, 0);
+        readline.cursorTo(process.stdout, 0);
+        process.stdout.write(progressLine);
+      } else {
+        // Fallback for non-TTY environments: only print every 10% to avoid flooding
+        if (processed % Math.max(1, Math.floor(totalFiles / 10)) === 0 || processed === totalFiles) {
+          process.stdout.write(`\n${progressLine}`);
         }
       }
     }
