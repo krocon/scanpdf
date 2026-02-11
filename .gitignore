@@ -143,3 +143,5 @@ vite.config.ts.timestamp-*
 /key.txt
 /set_key.sh
 /.output.txt
+
+*.csv
