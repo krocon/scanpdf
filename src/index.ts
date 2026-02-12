@@ -5,6 +5,7 @@ import {createObjectCsvWriter} from "csv-writer";
 import OpenAI from "openai";
 import readline from "node:readline";
 import "dotenv/config";
+import * as csv from "fast-csv";
 
 const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY});
 
@@ -110,6 +111,26 @@ function getGroupName(file: string): string {
   return DEFAULT_OUTPUT;
 }
 
+async function loadExistingTransactions(filePath: string): Promise<any[]> {
+  if (!fs.existsSync(filePath)) return [];
+
+  return new Promise((resolve, reject) => {
+    const transactions: any[] = [];
+    fs.createReadStream(filePath)
+      .pipe(csv.parse({headers: true}))
+      .on("data", (row) => {
+        transactions.push({
+          date: row.Date,
+          description: row.Description,
+          amount: parseFloat(row.Amount),
+          currency: row.Currency,
+        });
+      })
+      .on("end", () => resolve(transactions))
+      .on("error", (error) => reject(error));
+  });
+}
+
 async function run() {
   console.log("Scanning for PDF files in:", DATA_DIR);
   if (!fs.existsSync(DATA_DIR)) {
@@ -120,86 +141,102 @@ async function run() {
   const totalFiles = files.length;
   console.log(`Found ${totalFiles} PDF files.`);
 
-  // Pre-calculate counts per group
-  const groupStats: Record<string, { total: number; processed: number }> = {};
+  // Group files
+  const filesByGroup: Record<string, string[]> = {};
   for (const file of files) {
     const groupName = getGroupName(file);
-    if (!groupStats[groupName]) {
-      groupStats[groupName] = { total: 0, processed: 0 };
+    if (!filesByGroup[groupName]) {
+      filesByGroup[groupName] = [];
     }
-    groupStats[groupName].total++;
+    filesByGroup[groupName].push(file);
   }
 
-  const transactionsByGroup: Record<string, any[]> = {};
+  // Pre-calculate counts per group
+  const groupStats: Record<string, { total: number; processed: number }> = {};
+  for (const [groupName, groupFiles] of Object.entries(filesByGroup)) {
+    groupStats[groupName] = {total: groupFiles.length, processed: 0};
+  }
+
   let totalProcessed = 0;
-  let skippedCount = 0;
   const errors: string[] = [];
   const startTime = Date.now();
 
-  for (const file of files) {
-    const groupName = getGroupName(file);
-    try {
-      const text = await extractText(file);
-      const transactions = await extractStructured(text);
-      
-      if (!transactionsByGroup[groupName]) {
-        transactionsByGroup[groupName] = [];
-      }
-      transactionsByGroup[groupName].push(...transactions);
-    } catch (error) {
-      errors.push(file);
-    } finally {
-      totalProcessed++;
-      groupStats[groupName].processed++;
+  for (const groupName of Object.keys(filesByGroup)) {
+    const groupFiles = filesByGroup[groupName];
+    const newTransactions: any[] = [];
 
-      const elapsed = Date.now() - startTime;
-      const avgTimePerFile = elapsed / totalProcessed;
-      const estimatedRemaining = avgTimePerFile * (totalFiles - totalProcessed);
-      const totalPercent = ((totalProcessed / totalFiles) * 100).toFixed(1);
-      
-      let progressLine = `Gesamt: [${totalPercent}%] ${totalProcessed}/${totalFiles} | Zeit: ${formatTime(elapsed)} | Verbleibend: ${formatTime(estimatedRemaining)}`;
-      
-      // Add group progress
-      const groupParts = Object.entries(groupStats).map(([name, stats]) => {
-        const percent = ((stats.processed / stats.total) * 100).toFixed(0);
-        return `${name.replace('.csv', '')}: ${stats.processed}/${stats.total} (${percent}%)`;
+    for (const file of groupFiles) {
+      try {
+        const text = await extractText(file);
+        const transactions = await extractStructured(text);
+        newTransactions.push(...transactions);
+      } catch (error) {
+        errors.push(file);
+      } finally {
+        totalProcessed++;
+        groupStats[groupName].processed++;
+
+        const elapsed = Date.now() - startTime;
+        const avgTimePerFile = elapsed / totalProcessed;
+        const estimatedRemaining = avgTimePerFile * (totalFiles - totalProcessed);
+        const totalPercent = ((totalProcessed / totalFiles) * 100).toFixed(1);
+
+        let progressLine = `Gesamt: [${totalPercent}%] ${totalProcessed}/${totalFiles} | Zeit: ${formatTime(elapsed)} | Verbleibend: ${formatTime(estimatedRemaining)}`;
+
+        // Add group progress
+        const groupParts = Object.entries(groupStats).map(([name, stats]) => {
+          const percent = ((stats.processed / stats.total) * 100).toFixed(0);
+          return `${name.replace(".csv", "")}: ${stats.processed}/${stats.total} (${percent}%)`;
+        });
+
+        if (process.stdout.isTTY) {
+          // Move up one line if we already printed a group line (except for the first file)
+          if (totalProcessed > 1) {
+            readline.moveCursor(process.stdout, 0, -1);
+          }
+          readline.clearLine(process.stdout, 0);
+          readline.cursorTo(process.stdout, 0);
+          process.stdout.write(progressLine + "\n");
+          readline.clearLine(process.stdout, 0);
+          readline.cursorTo(process.stdout, 0);
+          process.stdout.write(`Groups: ${groupParts.join(" | ")} | Fehler: ${errors.length}`);
+        } else {
+          if (totalProcessed % Math.max(1, Math.floor(totalFiles / 10)) === 0 || totalProcessed === totalFiles) {
+            process.stdout.write(`\n${progressLine} | Groups: ${groupParts.join(" | ")}`);
+          }
+        }
+      }
+    }
+
+    // Process and write the group's CSV after all files in the group are processed
+    if (newTransactions.length > 0) {
+      const existingTransactions = await loadExistingTransactions(groupName);
+      const allTransactions = [...existingTransactions, ...newTransactions];
+
+      // De-duplicate
+      const seen = new Set();
+      const uniqueTransactions = allTransactions.filter((t) => {
+        const key = `${t.date}|${t.description}|${t.amount}|${t.currency}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
       });
-      
-      const fullProgress = `${progressLine}\nGroups: ${groupParts.join(" | ")} | Fehler: ${errors.length}`;
 
-      if (process.stdout.isTTY) {
-        // Move up one line if we already printed a group line (except for the first file)
-        if (totalProcessed > 1) {
-          readline.moveCursor(process.stdout, 0, -1);
-        }
-        readline.clearLine(process.stdout, 0);
-        readline.cursorTo(process.stdout, 0);
-        process.stdout.write(progressLine + "\n");
-        readline.clearLine(process.stdout, 0);
-        readline.cursorTo(process.stdout, 0);
-        process.stdout.write(`Groups: ${groupParts.join(" | ")} | Fehler: ${errors.length}`);
-      } else {
-        if (totalProcessed % Math.max(1, Math.floor(totalFiles / 10)) === 0 || totalProcessed === totalFiles) {
-          process.stdout.write(`\n${progressLine} | Groups: ${groupParts.join(" | ")}`);
-        }
-      }
+      // Temporal sorting
+      uniqueTransactions.sort((a, b) => {
+        const dateA = a.date || "";
+        const dateB = b.date || "";
+        return dateA.localeCompare(dateB);
+      });
+
+      const writer = getCsvWriter(groupName);
+      await writer.writeRecords(uniqueTransactions);
     }
   }
 
-  console.log("\n"); // Move to new line after progress
-  
-  const groups = Object.keys(transactionsByGroup);
-  if (groups.length > 0) {
-    for (const groupName of groups) {
-      const transactions = transactionsByGroup[groupName];
-      if (transactions.length > 0) {
-        const writer = getCsvWriter(groupName);
-        await writer.writeRecords(transactions);
-        console.log(`Done → ${groupName} (${transactions.length} transactions)`);
-      }
-    }
-  } else {
-    console.log("No transactions found to write.");
+  console.log("\n\nProcessing complete.");
+  if (errors.length > 0) {
+    console.log("Errors in following files:", errors);
   }
 }
 
